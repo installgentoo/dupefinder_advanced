@@ -1,0 +1,31 @@
+[package]
+name = "dedup-advanced"
+version = "1.0.0"
+authors = ["Alexander Drozdoff"]
+edition = "2018"
+description = "Fast and accurate deduplication tool to be used with blockhash"
+license = "MIT"
+repository = "https://github.com/installgentoo/dedup_advanced"
+homepage = "https://github.com/installgentoo/dedup_advanced"
+
+[profile.release]
+panic = 'abort'
+lto = true
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package."grafix-toolbox"]
+opt-level = 0
+
+[[bin]]
+name = "dedup_adv"
+path = "src/recognise.rs"
+
+[dependencies]
+clap = "^2"
+hamming = "^0.1"
+imagesize = "^0.8"
+
+grafix-toolbox = "0.7.7"
