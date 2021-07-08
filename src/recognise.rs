@@ -41,34 +41,46 @@ Note that paths are relative and you must run dedup from the same directory as f
 					 -A, --append      'Append duplicates filenames to main file. WILL MANIPULATE FILESYSTEM!'",
 				),
 		)
+		.subcommand(
+			SubCommand::with_name("dirs")
+				.about("Prints directories that share N duplicates")
+				.args_from_usage(
+					"<PATH> 'Path to the list of duplicates'
+					 -m, --matches=[MATCHES] 'Print directories that share at least N matches'",
+				),
+		)
 		.get_matches();
 
 	if let Some(args) = args.subcommand_matches("find") {
 		run_search(args);
 	} else if let Some(args) = args.subcommand_matches("filter") {
 		run_filter(args);
+	} else if let Some(args) = args.subcommand_matches("dirs") {
+		run_dirfilter(args);
 	}
 }
 
 fn run_filter(args: &clap::ArgMatches) {
 	let (depth_first, append, paths) = (args.is_present("depth-first"), args.is_present("append"), args.value_of("PATH").unwrap());
 	let paths = FS::Load::Text(paths).expect(&format!("Couldn't open results file {}", paths));
-	let paths = paths.lines().collect::<Vec<&str>>();
-	FnStatic!(_paths, Vec<&'static str>, { paths.iter().map(|p| unsafe { mem::transmute(*p) }).collect() });
-	let (mut start, mut end) = (0, 0);
-	let tasks: Vec<_> = _paths()
-		.iter()
-		.enumerate()
-		.filter_map(|(n, l)| {
-			end += 1;
-			if l.is_empty() {
-				let t = task::spawn(async move {
-					let end = end - 1;
-					let mut sizes = HashMap::with_capacity(end - start);
-					let mut dupes = _paths()[start..end].iter().copied().collect::<Vec<&str>>();
+	let paths = paths
+		.lines()
+		.map(|p| p.to_string())
+		.collect::<Vec<_>>()
+		.split(|l| l.is_empty())
+		.filter_map(|c| Some(c.to_vec()).filter(|c| !c.is_empty()))
+		.collect::<Vec<Vec<String>>>();
+
+	let tasks: Vec<_> = paths
+		.into_iter()
+		.map(|mut path| {
+			task::spawn(async move {
+				let mut sizes: HashMap<&'static str, _> = HashMap::with_capacity(path.len());
+				path.sort_unstable_by(move |l, r| {
 					let depth = |l: &str| Path::new(l).ancestors().count();
 					let alph = |l: &str| Path::new(l).ancestors().skip(1).map(|p| p.to_str().unwrap().to_string()).collect::<Vec<String>>();
-					fn size<'a>(sizes: &mut HashMap<&'a str, usize>, p: &'a str) -> usize {
+					let mut size = |p: &str| {
+						let p = unsafe { mem::transmute(p) };
 						*sizes.entry(p).or_insert(imagesize::size(p).ok().map_or_else(
 							|| {
 								eprintln!("Failed to determine size of {:?}", p);
@@ -76,52 +88,45 @@ fn run_filter(args: &clap::ArgMatches) {
 							},
 							|size| size.width * size.height,
 						))
+					};
+					let depth = || {
+						alph(l)
+							.iter()
+							.rev()
+							.zip(alph(r).iter().rev())
+							.find_map(|(l, r)| Some(l.cmp(r)).filter(|c| *c != ord::Equal))
+							.unwrap_or(depth(l).cmp(&depth(r)))
+					};
+
+					let mut size = || size(r).cmp(&size(l));
+					if depth_first {
+						depth().then(size()).reverse()
+					} else {
+						size().then(depth()).reverse()
 					}
-					dupes.sort_unstable_by(|l, r| {
-						let depth = || {
-							alph(l)
-								.iter()
-								.rev()
-								.zip(alph(r).iter().rev())
-								.find_map(|(l, r)| Some(l.cmp(r)).filter(|c| *c != ord::Equal))
-								.unwrap_or(depth(l).cmp(&depth(r)))
-						};
-
-						let mut size = || size(&mut sizes, r).cmp(&size(&mut sizes, l));
-						if depth_first {
-							depth().then(size()).reverse()
-						} else {
-							size().then(depth()).reverse()
-						}
-					});
-					let (base, dupes) = dupes.split_last().unwrap();
-					(|| {
-						if append {
-							let base = Path::new(base);
-							let previous = base.to_owned();
-							let (path, mut base, ext) = (base.parent()?, base.file_stem()?.to_str()?.to_string(), base.extension()?);
-							base.push('_');
-							for n in dupes {
-								base.push_str(Path::new(n).file_stem()?.to_str()?);
-							}
-							let max_len = 247 - ext.to_str()?.len();
-							let base: String = base.char_indices().take_while(|(i, _)| *i < max_len).map(|(_, c)| c).collect();
-							let path = path.join(format!("{}.{}", &base, ext.to_str()?));
-							if let Err(e) = fs::rename(&previous, &path) {
-								eprintln!("Could not rename base file {:?} to {:?}, err {}", previous, path, e);
-							}
-						}
-						Some(())
-					})()
-					.unwrap();
-					dupes.iter().for_each(|d| println!("{}", d));
 				});
-
-				start = end;
-				Some(t)
-			} else {
-				None
-			}
+				let (base, dupes) = path.split_last().unwrap();
+				(|| {
+					if append {
+						let base = Path::new(base);
+						let previous = base.to_owned();
+						let (path, mut base, ext) = (base.parent()?, base.file_stem()?.to_str()?.to_string(), base.extension()?);
+						base.push('_');
+						for n in dupes {
+							base.push_str(Path::new(n).file_stem()?.to_str()?);
+						}
+						let max_len = 247 - ext.to_str()?.len();
+						let base: String = base.char_indices().take_while(|(i, _)| *i < max_len).map(|(_, c)| c).collect();
+						let path = path.join(format!("{}.{}", &base, ext.to_str()?));
+						if let Err(e) = fs::rename(&previous, &path) {
+							eprintln!("Could not rename base file {:?} to {:?}, err {}", previous, path, e);
+						}
+					}
+					Some(())
+				})()
+				.unwrap();
+				dupes.iter().for_each(|d| println!("{}", d));
+			})
 		})
 		.collect();
 
@@ -130,6 +135,29 @@ fn run_filter(args: &clap::ArgMatches) {
 			t.await
 		}
 	});
+}
+
+fn run_dirfilter(args: &clap::ArgMatches) {
+	let (min_matches, paths) = (args.value_of("matches").and_then(|a| a.parse().ok()).unwrap_or(4).max(1), args.value_of("PATH").unwrap());
+	let paths = FS::Load::Text(paths).expect(&format!("Couldn't open results file {}", paths));
+	let paths = paths
+		.lines()
+		.collect::<Vec<_>>()
+		.split(|l| l.is_empty())
+		.filter(|a| !a.is_empty())
+		.map(|c| {
+			let mut chunk = c.iter().map(|l| Path::new(l).parent().unwrap().to_str().unwrap().to_string()).collect::<Vec<String>>();
+			chunk.sort_unstable();
+			chunk.dedup();
+			chunk
+		})
+		.collect::<Vec<Vec<String>>>();
+
+	let paths = paths.into_iter().fold(HashMap::new(), |mut map, chunk| {
+		chunk.into_iter().for_each(|p| *map.entry(p).or_insert(0) += 1);
+		map
+	});
+	paths.into_iter().filter(|(_, c)| *c >= min_matches).for_each(|(p, _)| println!("{}", p));
 }
 
 fn run_search(args: &clap::ArgMatches) {

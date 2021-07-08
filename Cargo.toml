@@ -1,6 +1,6 @@
 [package]
 name = "dedup-advanced"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["Alexander Drozdoff"]
 edition = "2018"
 description = "Fast and accurate deduplication tool to be used with blockhash"
