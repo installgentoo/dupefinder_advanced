@@ -49,6 +49,16 @@ Note that paths are relative and you must run dedup from the same directory as f
 					 -m, --matches=[MATCHES] 'Print directories that share at least N matches'",
 				),
 		)
+		.subcommand(
+			SubCommand::with_name("names")
+				.about("Prints all files with duplicates within a list of filenames. Uses regexp to find matching ids in filenames")
+				.args_from_usage(
+					"<PATH>  'Path to the list of blockhashes'
+					 [PATH2] 'If present duplicate wills be considered within PATH -> PATH2'
+					 -r, --regex=[REGEX] 'Regexp for the id. Defaults to \"^[0-9]*\"'
+					 -m, --match=[MATCH] 'Regexp to match id against. \"__ARG__\" will be substituted with id. If not supplied will check for id'",
+				),
+		)
 		.get_matches();
 
 	if let Some(args) = args.subcommand_matches("find") {
@@ -57,6 +67,8 @@ Note that paths are relative and you must run dedup from the same directory as f
 		run_filter(args);
 	} else if let Some(args) = args.subcommand_matches("dirs") {
 		run_dirfilter(args);
+	} else if let Some(args) = args.subcommand_matches("names") {
+		run_namesearch(args);
 	}
 }
 
@@ -160,6 +172,57 @@ fn run_dirfilter(args: &clap::ArgMatches) {
 	paths.into_iter().filter(|(_, c)| *c >= min_matches).for_each(|(p, _)| println!("{}", p));
 }
 
+fn run_namesearch(args: &clap::ArgMatches) {
+	let args = unsafe { mem::transmute::<_, &'static clap::ArgMatches>(args) };
+	let (regex, regex2, paths, paths2) = (
+		args.value_of("regex").unwrap_or("^[0-9]*"),
+		args.value_of("match"),
+		args.value_of("PATH").unwrap(),
+		args.value_of("PATH2"),
+	);
+
+	let load = |p| FS::Load::Text(p).expect(&format!("Couldn't open paths file {}", p));
+	let paths = load(paths);
+	let paths2 = paths2.map(load);
+
+	let regex = regex::Regex::new(regex).expect("Bad regex");
+	let paths = paths
+		.lines()
+		.into_iter()
+		.filter_map(|path| Some(unsafe { mem::transmute((path, regex.find(path)?.as_str())) }))
+		.collect::<HashMap<&str, &str>>();
+
+	let (paths, paths2) = StaticPtr!(&paths, &paths2);
+	let tasks: Vec<_> = paths
+		.get()
+		.iter()
+		.map(|(name, idx)| {
+			task::spawn(async move {
+				let is_match: Box<dyn Fn(_) -> _> = if let Some(regex2) = regex2 {
+					let regex2 = regex2.replace("__ARG__", idx);
+					let regex2 = regex::Regex::new(&regex2).expect("Bad match regex");
+					Box::new(move |l| regex2.find(l).is_some())
+				} else {
+					Box::new(|l| l.contains(idx))
+				};
+
+				if let Some(paths2) = paths2.get() {
+					paths2.lines().find(|l| is_match(l))
+				} else {
+					paths.get().iter().find(|(l, _)| is_match(l) && *l != name).map(|(l, _)| *l)
+				}
+				.map(|m| println!("{}\n{}\n", name, m));
+			})
+		})
+		.collect();
+
+	task::block_on(async move {
+		for t in tasks {
+			t.await
+		}
+	});
+}
+
 fn run_search(args: &clap::ArgMatches) {
 	let (num_cpus, ultra_precision, show_differences, precision, paths, paths2) = (
 		num_cpus::get_physical(),
@@ -171,7 +234,7 @@ fn run_search(args: &clap::ArgMatches) {
 	);
 
 	type Names = HashMap<usize, &'static str>;
-	fn parse_paths<'a>(paths: &str) -> (Vec<u8>, Names) {
+	fn parse_paths(paths: &str) -> (Vec<u8>, Names) {
 		let mut hashes = vec![];
 		let names = paths
 			.lines()
@@ -197,7 +260,7 @@ fn run_search(args: &clap::ArgMatches) {
 	let (h1, names1) = parse_paths(&paths);
 	FnStatic!(hashes1, Vec<u8>, { h1 });
 	let paths2 = paths2.map(|p| FS::Load::Text(p).expect(&format!("Couldn't open blockhash list file {}", p)));
-	let (mut hashes2, names2) = if let Some((h, n)) = paths2.as_ref().map(|p| parse_paths(&p)) { (h, n) } else { Def() };
+	let (mut hashes2, names2) = if let Some((h, n)) = paths2.as_ref().map(|p| parse_paths(p)) { (h, n) } else { Def() };
 
 	let two_sets = !hashes2.is_empty();
 	let ultra_precision = ultra_precision && precision > 89;
@@ -257,12 +320,10 @@ fn run_search(args: &clap::ArgMatches) {
 									dupe.store(true, Ordering::Release);
 									*unsafe { hashes2.get_unchecked_mut(i2) } = 0;
 									println!("{}", name);
+								} else if let Ok(f) = FS::Load::File(name).and_then(uImage::new) {
+									let _ = snl.send_async(Some((i2, name, f))).await.unwrap();
 								} else {
-									if let Ok(f) = FS::Load::File(name).and_then(|f| uImage::new(f)) {
-										let _ = snl.send_async(Some((i2, name, f))).await.unwrap();
-									} else {
-										eprintln!("could not open copy {}", name);
-									}
+									eprintln!("could not open copy {}", name);
 								}
 							}
 						}
@@ -338,7 +399,6 @@ fn run_search(args: &clap::ArgMatches) {
 								acc + d
 							})
 							.sqrt();
-						data.len() as f32;
 						if diff < 1. + 10. * (100 - precision) as f32 {
 							dupe.store(true, Ordering::Release);
 							*unsafe { hashes2.get_unchecked_mut(i2) } = 0;

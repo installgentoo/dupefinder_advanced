@@ -13,8 +13,10 @@ SLOT="0"
 KEYWORDS="~amd64 ~x86"
 IUSE=""
 
-DEPEND="virtual/rust"
-RDEPEND="${DEPEND}"
+RDEPEND="virtual/rust
+		app-misc/blockhash
+		media-libs/glfw"
+DEPEND="${RDEPEND}"
 
 src_unpack() {
 	cargo_src_unpack
