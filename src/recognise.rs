@@ -1,5 +1,12 @@
 #![warn(clippy::all)]
-#![allow(clippy::range_plus_one, clippy::many_single_char_names, clippy::too_many_arguments, clippy::cast_lossless, unused_variables)]
+#![allow(
+	clippy::range_plus_one,
+	clippy::many_single_char_names,
+	clippy::too_many_arguments,
+	clippy::cast_lossless,
+	unused_variables,
+	deprecated
+)]
 
 use grafix_toolbox::*;
 
@@ -18,14 +25,15 @@ fn main() {
 Install blockhash first: https://github.com/commonsmachinery/blockhash/
 To prepare a list of blockhashes run:
 find . -regextype posix-egrep -regex ".*\.(png|jpe?g)$" -type f -printf '"%p"\n' | xargs -IF -P8 blockhash F > hashes
+Alternatively supply a folder as PATH to have the command run for you, but this still requires blockhash installed
 
 Note that paths are relative and you must run dedup from the same directory as find"#,
 		)
 		.subcommand(
 			SubCommand::with_name("find")
-				.about("Prints all files with duplicates within a list of blockhashes. Prints filenames to strdout and progress to stderr, so redirect output to a file 'dedup_adv find hashes > dupes'")
+				.about("Prints all files with duplicates within a list of blockhashes. Prints filenames to stdout and progress to stderr, so redirect output to a file 'dedup_adv find hashes > dupes'")
 				.args_from_usage(
-					"<PATH>  'Path to the list of blockhashes'
+					"<PATH>  'Path to the list of blockhashes. Alternatively accepts directory and runs find internally.'
 					 [PATH2] 'If present duplicate wills be considered within PATH -> PATH2'
 					 -s, --similarity=[SIMILARITY] 'Integer [1..100], cutoff similarity percentage'
 					 -U, --ultra                   'Ultra precision, performs pixelwise feature comparisons'
@@ -256,10 +264,10 @@ fn run_search(args: &clap::ArgMatches) {
 		(hashes, names)
 	}
 
-	let paths = FS::Load::Text(paths).expect(&format!("Couldn't open blockhash list file {}", paths));
+	let paths = process_path(paths).unwrap();
+	let paths2 = paths2.map(|p| process_path(p).unwrap());
 	let (h1, names1) = parse_paths(&paths);
-	FnStatic!(hashes1, Vec<u8>, { h1 });
-	let paths2 = paths2.map(|p| FS::Load::Text(p).expect(&format!("Couldn't open blockhash list file {}", p)));
+	FnStatic!(hashes1: Vec<u8>, { h1 });
 	let (mut hashes2, names2) = if let Some((h, n)) = paths2.as_ref().map(|p| parse_paths(p)) { (h, n) } else { Def() };
 
 	let two_sets = !hashes2.is_empty();
@@ -271,7 +279,7 @@ fn run_search(args: &clap::ArgMatches) {
 	let (total1, total2) = (names1.len() * 32, names2.len() * 32);
 	let (names2, mut hashes2) = StaticPtr!(&names2, hashes2);
 
-	let mut window = Window::get((50, 50, 64, 64), "Engine").expect("Can't start GL");
+	let mut window = Window::get((50, 50, 64, 64), "dedup").expect("Can't start GL");
 	GLDisable!(DEPTH_TEST, BLEND, MULTISAMPLE, CULL_FACE, DEPTH_WRITEMASK);
 
 	let mut subs = Shader::new((mesh__2d_screen_vs, substract_ps)).expect("Can't create shader");
@@ -320,7 +328,7 @@ fn run_search(args: &clap::ArgMatches) {
 									dupe.store(true, Ordering::Release);
 									*unsafe { hashes2.get_unchecked_mut(i2) } = 0;
 									println!("{}", name);
-								} else if let Ok(f) = FS::Load::File(name).and_then(uImage::new) {
+								} else if let Ok(f) = FS::Load::File(name).and_then(uImage::load) {
 									let _ = snl.send_async(Some((i2, name, f))).await.unwrap();
 								} else {
 									eprintln!("could not open copy {}", name);
@@ -344,7 +352,7 @@ fn run_search(args: &clap::ArgMatches) {
 				let mut base = None;
 				while let Some((i2, name, recv)) = offhand_rx.recv().wait().unwrap() {
 					if let Some(f) = base_file.take() {
-						if let Ok(b) = uImage::new(f.take()) {
+						if let Ok(b) = uImage::load(f.take()) {
 							base = Some(imgify(b));
 						} else {
 							eprintln!("could not open base {}", base_name);
@@ -370,8 +378,8 @@ fn run_search(args: &clap::ArgMatches) {
 							out.bind();
 							Screen::Draw();
 							if show_differences {
-								window.draw_to_screen();
-								GL::ClearScreen((0., 1.));
+								window.bind();
+								window.clear((0, 1));
 								let b = out.tex.Bind(linear);
 								let _ = Uniforms!(render, ("tex", &b));
 								Screen::Draw();
@@ -426,10 +434,42 @@ fn run_search(args: &clap::ArgMatches) {
 	drop(offhand_sn);
 }
 
+fn process_path(path: &str) -> Res<String> {
+	let is_dir = std::fs::metadata(path).map_err(|e| format!("No file {path:?} found\n{e:?}"))?.is_dir();
+	if is_dir {
+		use std::process::{Command, Stdio};
+		if cfg!(target_os = "windows") {
+			return Err("Not supported on win".into());
+		}
+
+		let err = "Directories command simply runs 'find'. You must have blockhash, find and xargs in your PATH";
+
+		let mut find = Command::new("find")
+			.args([path, "-regextype", "posix-egrep", "-regex", ".*\\.(png|jpe?g|gif|webp|avif|jxl)$", "-type", "f", "-print0"])
+			.stdout(Stdio::piped())
+			.spawn()
+			.map_err(|e| format!("No find installed\n{err}\n{e}"))?;
+
+		let threads = 2 * num_cpus::get();
+		let hashes = Command::new("xargs")
+			.args(["-0", "-IF", &format!("-P{threads}"), "blockhash", "F"])
+			.stdin(find.stdout.take().unwrap())
+			.stdout(Stdio::piped())
+			.spawn()
+			.map_err(|e| format!("No blockhash/xargs installed\n{err}\n{e}"))?;
+
+		let output = Res(hashes.wait_with_output())?;
+		Res(find.wait())?;
+
+		Ok(Res(String::from_utf8(output.stdout))?)
+	} else {
+		FS::Load::Text(path).map_err(|e| format!("Couldn't open results file {path}\n{e:?}"))
+	}
+}
+
 SHADER!(
 	substract_ps,
-	r"#version 330 core
-	in vec2 glTexCoord;
+	r"in vec2 glTexCoord;
 	layout(location = 0)out vec4 glFragColor;
 	uniform sampler2D tex1, tex2;
 	uniform vec2 size;
@@ -438,7 +478,7 @@ SHADER!(
 
 	float pix(sampler2D t) {
 		vec3 p = texture(t, glTexCoord).rgb;
-		return (p.r + p.g + p.b) * 0.333;
+		return (0.2126*p.r + 0.7152*p.g + 0.0722*p.b);
 	}
 
 	float val(float x, float y, sampler2D t) {

@@ -1,6 +1,6 @@
 [package]
 name = "dedup-advanced"
-version = "1.2.0"
+version = "1.3.0"
 authors = ["Alexander Drozdoff"]
 edition = "2018"
 description = "Fast and accurate deduplication tool to be used with blockhash"
@@ -24,9 +24,9 @@ name = "dedup_adv"
 path = "src/recognise.rs"
 
 [dependencies]
-clap = "^2"
+clap = "^3"
 hamming = "^0.1"
 imagesize = "^0.9"
 regex = "^1.5"
 
-grafix-toolbox = "=0.7.7"
+grafix-toolbox = { version = "=0.8.5", features = ["adv_img"] }
