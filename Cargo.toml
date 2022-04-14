@@ -9,6 +9,7 @@ repository = "https://github.com/installgentoo/dedup_advanced"
 homepage = "https://github.com/installgentoo/dedup_advanced"
 
 [profile.release]
+strip = true
 panic = 'abort'
 lto = true
 codegen-units = 1
